@@ -23,6 +23,25 @@ type Plan = {
   ideas: { title: string; detail: string }[];
 };
 
+type PlanResponse = {
+  plan: Plan;
+  mode: "built-in" | "gemini";
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPlanResponse(value: unknown): value is PlanResponse {
+  if (!isRecord(value) || !isRecord(value.plan)) return false;
+  return (value.mode === "built-in" || value.mode === "gemini")
+    && typeof value.plan.summary === "string"
+    && Array.isArray(value.plan.budgetBreakdown)
+    && Array.isArray(value.plan.timeline)
+    && Array.isArray(value.plan.vendorChecklist)
+    && Array.isArray(value.plan.ideas);
+}
+
 const initialForm: PlanRequest = {
   eventType: "Wedding",
   eventName: "A summer garden wedding",
@@ -112,6 +131,7 @@ function formatCurrency(value: number) {
 export default function Home() {
   const [form, setForm] = useState(initialForm);
   const [plan, setPlan] = useState(samplePlan);
+  const [planMode, setPlanMode] = useState<PlanResponse["mode"]>("built-in");
   const [checked, setChecked] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState("");
@@ -136,13 +156,21 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),
       });
-      const result = await response.json();
+      const result: unknown = await response.json();
 
       if (!response.ok) {
-        throw new Error(result.error || "Your plan could not be generated. Please try again.");
+        const message = isRecord(result) && typeof result.error === "string"
+          ? result.error
+          : "Your plan could not be generated. Please try again.";
+        throw new Error(message);
       }
 
-      setPlan(result.plan as Plan);
+      if (!isPlanResponse(result)) {
+        throw new Error("The planning assistant returned an unexpected response. Please try again.");
+      }
+
+      setPlan(result.plan);
+      setPlanMode(result.mode);
       setChecked([]);
     } catch (requestError) {
       setError(
@@ -264,7 +292,7 @@ export default function Home() {
           <div className="plan-column" id="your-plan">
             <div className="plan-heading">
               <div><div className="eyebrow"><span className="live-dot" /> YOUR GATHERLY GAME PLAN</div><h3>{form.eventName || `${form.eventType} celebration`}</h3></div>
-              <span className="plan-badge">A good place to start</span>
+              <span className="plan-badge">{planMode === "gemini" ? "Personalized with Gemini" : "Ready — no API key needed"}</span>
             </div>
             <p className="plan-summary">{plan.summary}</p>
 

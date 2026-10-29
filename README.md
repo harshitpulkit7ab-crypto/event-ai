@@ -1,15 +1,14 @@
 # Gatherly
 
-Gatherly is a GenAI-powered planning assistant for weddings, birthdays, and community events. It turns a few event details into a personalized budget, planning timeline, vendor checklist, and creative ideas.
+Gatherly helps plan weddings, birthdays, and community events with a personalized budget, timeline, vendor checklist, and creative ideas. Plan generation works out of the box using the built-in planner: **no API key, account, or environment variables are needed to build, deploy, or use the app.**
 
 ## Deploy to Vercel
 
 1. Import this repository into [Vercel](https://vercel.com/new).
-2. Keep the detected Next.js framework and default build settings.
-3. In the Vercel project settings, add `GEMINI_API_KEY` as an environment variable for the environments you want to use.
-4. Redeploy. The app is then available at your Vercel project URL.
+2. Select **Next.js** and keep the default build settings.
+3. Deploy. No environment variables or API secrets are required.
 
-Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/apikey). Keep the key in Vercel's environment-variable settings; never put it in client-side code or commit it to the repository. Copy `.env.example` to `.env.local` for local development.
+The built-in planner generates complete personalized plans without connecting to a third-party service. To optionally enhance plans with Gemini, set `GEMINI_API_KEY` in your server environment; this is entirely optional, is never requested by the app, and the built-in planner continues to work if the service is unavailable. Never commit API keys.
 
 ## Run locally
 
@@ -20,11 +19,12 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Add `GEMINI_API_KEY` to `.env.local` to generate personalized plans. A sample plan is included so the planner UI is useful before the key is configured.
+Open [http://localhost:3000](http://localhost:3000). The planner works immediately without environment variables.
 
 ## Checks
 
 ```bash
 npm run build
 npm run typecheck
+npm run test:smoke
 ```
