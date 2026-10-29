@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 
 const port = 3100;
 const origin = `http://127.0.0.1:${port}`;
+const environment = { ...process.env, NEXT_TELEMETRY_DISABLED: "1" };
+delete environment.GEMINI_API_KEY;
 const server = spawn(
   process.execPath,
   ["node_modules/next/dist/bin/next", "start", "--hostname", "127.0.0.1", "--port", String(port)],
   {
-    env: { ...process.env, GEMINI_API_KEY: "", NEXT_TELEMETRY_DISABLED: "1" },
+    env: environment,
     stdio: "ignore",
   },
 );
@@ -33,11 +35,14 @@ async function waitForServer() {
 
 try {
   await waitForServer();
+  const homepage = await fetch(origin);
+  const page = await homepage.text();
+  assert.equal(homepage.status, 200);
+  assert.match(page, /Tell us what you.re celebrating/i);
+  assert.match(page, /ON-DEVICE AI/i);
 
-  const response = await fetch(`${origin}/api/plan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  const scenarios = [
+    {
       eventType: "Birthday",
       eventName: "Riley's picnic",
       date: "",
@@ -46,17 +51,52 @@ try {
       guests: 36,
       style: "Colorful and relaxed",
       notes: "Include a low-cost craft table.",
-    }),
-  });
-  assert.equal(response.status, 200, "The planner should work without an API key.");
+    },
+    {
+      eventType: "Wedding",
+      eventName: "Sam and Alex",
+      date: "2027-06-12",
+      location: "Austin",
+      budget: 18_001,
+      guests: 85,
+      style: "Garden party",
+      notes: "",
+    },
+    {
+      eventType: "Community",
+      eventName: "Summer block party",
+      date: "",
+      location: "North Park",
+      budget: 6500,
+      guests: 140,
+      style: "Family friendly",
+      notes: "Provide accessible seating.",
+    },
+  ];
 
-  const result = await response.json();
-  assert.equal(result.mode, "built-in");
-  assert.equal(result.plan.budgetBreakdown.reduce((sum, item) => sum + item.amount, 0), 2400);
-  assert.equal(result.plan.timeline.length, 4);
-  assert.equal(result.plan.vendorChecklist.length >= 6, true);
-  assert.match(result.plan.ideas[0].title, /colorful and relaxed/i);
-  assert.match(result.plan.ideas[1].detail, /low-cost craft table/i);
+  for (const scenario of scenarios) {
+    const response = await fetch(`${origin}/api/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(scenario),
+    });
+    assert.equal(response.status, 200, `${scenario.eventType} planning should work without an API key.`);
+
+    const result = await response.json();
+    assert.equal(result.mode, "built-in");
+    const plannedBudget = result.plan.budgetBreakdown.reduce((sum, item) => sum + item.amount, 0);
+    assert.ok(Math.abs(plannedBudget - scenario.budget) < 0.01, `${scenario.eventType} budget should balance.`);
+    assert.equal(result.plan.timeline.length, 4);
+    assert.equal(result.plan.vendorChecklist.length >= 6, true);
+  }
+
+  const birthdayResult = await fetch(`${origin}/api/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(scenarios[0]),
+  }).then((response) => response.json());
+  assert.match(birthdayResult.plan.ideas[0].title, /colorful and relaxed/i);
+  assert.match(birthdayResult.plan.ideas[1].detail, /low-cost craft table/i);
 
   const invalidResponse = await fetch(`${origin}/api/plan`, {
     method: "POST",
@@ -65,7 +105,14 @@ try {
   });
   assert.equal(invalidResponse.status, 400, "Invalid form submissions should be rejected.");
 
-  console.log("Production planner smoke test passed without a Gemini API key.");
+  const invalidDateResponse = await fetch(`${origin}/api/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...scenarios[0], date: "2027-02-31" }),
+  });
+  assert.equal(invalidDateResponse.status, 400, "Impossible event dates should be rejected.");
+
+  console.log("Production event planning works for all event types without an API key.");
 } finally {
   server.kill();
 }

@@ -1,46 +1,16 @@
 "use client";
 
-import { FormEvent, useState } from "react";
-
-type EventType = "Wedding" | "Birthday" | "Community";
-
-type PlanRequest = {
-  eventType: EventType;
-  eventName: string;
-  date: string;
-  location: string;
-  budget: number;
-  guests: number;
-  style: string;
-  notes: string;
-};
-
-type Plan = {
-  summary: string;
-  budgetBreakdown: { category: string; amount: number }[];
-  timeline: { timing: string; title: string; detail: string }[];
-  vendorChecklist: { name: string; priority: "Essential" | "Helpful" }[];
-  ideas: { title: string; detail: string }[];
-};
-
-type PlanResponse = {
-  plan: Plan;
-  mode: "built-in" | "gemini";
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isPlanResponse(value: unknown): value is PlanResponse {
-  if (!isRecord(value) || !isRecord(value.plan)) return false;
-  return (value.mode === "built-in" || value.mode === "gemini")
-    && typeof value.plan.summary === "string"
-    && Array.isArray(value.plan.budgetBreakdown)
-    && Array.isArray(value.plan.timeline)
-    && Array.isArray(value.plan.vendorChecklist)
-    && Array.isArray(value.plan.ideas);
-}
+import { FormEvent, useEffect, useState } from "react";
+import {
+  type BrowserAiAvailability,
+  type BrowserAiStatus,
+  type EventType,
+  type Plan,
+  type PlanRequest,
+  generatePlanWithBrowserAi,
+  getBrowserAiAvailability,
+  isPlanResponse,
+} from "@/lib/browser-ai";
 
 const initialForm: PlanRequest = {
   eventType: "Wedding",
@@ -128,13 +98,60 @@ function formatCurrency(value: number) {
   }).format(value);
 }
 
+function downloadPlan(plan: Plan, form: PlanRequest) {
+  const contents = [
+    `${form.eventName || `${form.eventType} celebration`} — Gatherly event plan`,
+    `${form.eventType} · ${form.guests} guests · ${form.date || "Date to be confirmed"} · ${form.location || "Location to be confirmed"}`,
+    `Budget: ${formatCurrency(form.budget)}`,
+    "",
+    plan.summary,
+    "",
+    "BUDGET",
+    ...plan.budgetBreakdown.map((item) => `${item.category}: ${formatCurrency(item.amount)}`),
+    "",
+    "TIMELINE",
+    ...plan.timeline.flatMap((item) => [`${item.timing} — ${item.title}`, `  ${item.detail}`]),
+    "",
+    "VENDOR CHECKLIST",
+    ...plan.vendorChecklist.map((item) => `[ ] ${item.name} (${item.priority})`),
+    "",
+    "PERSONAL TOUCHES",
+    ...plan.ideas.flatMap((idea) => [`${idea.title}`, `  ${idea.detail}`]),
+  ].join("\n");
+  const file = new Blob([contents], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(file);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${(form.eventName || `${form.eventType}-plan`).trim().replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "gatherly-plan"}.txt`;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
 export default function Home() {
   const [form, setForm] = useState(initialForm);
   const [plan, setPlan] = useState(samplePlan);
-  const [planMode, setPlanMode] = useState<PlanResponse["mode"]>("built-in");
+  const [planMode, setPlanMode] = useState<"sample" | "on-device" | "built-in">("sample");
+  const [aiAvailability, setAiAvailability] = useState<BrowserAiAvailability>("unavailable");
+  const [aiStatus, setAiStatus] = useState<BrowserAiStatus | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
   const [checked, setChecked] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState("");
+  const [aiNotice, setAiNotice] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    getBrowserAiAvailability()
+      .then((availability) => {
+        if (active) setAiAvailability(availability);
+      })
+      .catch(() => {
+        if (active) setAiAvailability("unavailable");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const allocatedBudget = plan.budgetBreakdown.reduce((sum, item) => sum + item.amount, 0);
   const essentialCount = plan.vendorChecklist.filter(
@@ -149,37 +166,46 @@ export default function Home() {
     event.preventDefault();
     setIsGenerating(true);
     setError("");
-
+    setAiNotice("");
+    setAiStatus("preparing");
+    setDownloadProgress(0);
     try {
-      const response = await fetch("/api/plan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+      const generatedPlan = await generatePlanWithBrowserAi(form, (status, progress) => {
+        setAiStatus(status);
+        if (typeof progress === "number") setDownloadProgress(progress);
       });
-      const result: unknown = await response.json();
-
-      if (!response.ok) {
-        const message = isRecord(result) && typeof result.error === "string"
-          ? result.error
-          : "Your plan could not be generated. Please try again.";
-        throw new Error(message);
-      }
-
-      if (!isPlanResponse(result)) {
-        throw new Error("The planning assistant returned an unexpected response. Please try again.");
-      }
-
-      setPlan(result.plan);
-      setPlanMode(result.mode);
+      setPlan(generatedPlan);
+      setPlanMode("on-device");
       setChecked([]);
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Your plan could not be generated. Please try again.",
-      );
+      setAiAvailability("available");
+    } catch {
+      setAiNotice("On-device AI couldn’t finish this plan, so the built-in planner created a personalized fallback.");
+      try {
+        const response = await fetch("/api/plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(form),
+        });
+        const result: unknown = await response.json();
+
+        if (!response.ok || !isPlanResponse(result)) {
+          throw new Error("Your plan could not be generated. Please try again.");
+        }
+
+        setPlan(result.plan);
+        setPlanMode(result.mode);
+        setChecked([]);
+        setAiAvailability("unavailable");
+      } catch (requestError) {
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : "Your plan could not be generated. Please try again.",
+        );
+      }
     } finally {
       setIsGenerating(false);
+      setAiStatus(null);
     }
   }
 
@@ -209,11 +235,10 @@ export default function Home() {
         <div className="hero-copy">
           <div className="eyebrow"><span className="eyebrow-dot" /> A little help for a lot of love</div>
           <h1>Good things happen<br />when we <span>gather.</span></h1>
-          <p>Big day, big birthday, or bringing your whole neighborhood together. Let’s make it feel like you.</p>
+          <p>A private, on-device AI planning companion for big days, big birthdays, and bringing your whole neighborhood together.</p>
           <a className="primary-button hero-button" href="#planner">Let’s make a plan <span aria-hidden="true">↓</span></a>
           <div className="hero-note">
-            <div className="avatar-stack" aria-hidden="true"><span>J</span><span>M</span><span>A</span><span>+</span></div>
-            <span>Thoughtful plans, less overwhelm.</span>
+            <span className="privacy-chip"><span aria-hidden="true">✦</span> ON-DEVICE AI · NO API KEY</span>
           </div>
         </div>
         <div className="hero-art" aria-label="Illustration of a garden gathering">
@@ -238,12 +263,29 @@ export default function Home() {
       <section className="planner-section" id="planner">
         <div className="section-heading">
           <div><div className="eyebrow">YOUR VERY OWN PLANNING BUDDY</div><h2>Start with the feeling.</h2></div>
-          <p>A few little details are all we need to dream up a plan that feels like yours.</p>
+          <p>Your browser’s built-in AI can turn a few details into an occasion that feels like yours. When AI isn’t available, your private built-in planner is ready instead.</p>
         </div>
 
         <div className="planner-grid">
           <form className="planner-card" onSubmit={generatePlan}>
             <div className="card-heading"><span className="step-number">01</span><div><h3>Tell us what you’re celebrating</h3><p>No spreadsheets required. Promise.</p></div></div>
+
+            <div className={`ai-ready-card ${aiAvailability}`} role="status">
+              <span className="ai-ready-mark" aria-hidden="true">✦</span>
+              <span className="ai-ready-copy">
+                <strong>
+                  {aiAvailability === "available" ? "Private AI is ready" :
+                    aiAvailability === "downloadable" || aiAvailability === "downloading" ? "On-device AI is ready to set up" :
+                      "Your private planner is ready"}
+                </strong>
+                <span>
+                  {aiAvailability === "available" ? "Your event details stay on this device." :
+                    aiAvailability === "downloadable" || aiAvailability === "downloading" ? "The AI model downloads from Chrome on first use." :
+                      "Personalized plans work in every browser. AI runs in supported Chrome."}
+                </span>
+              </span>
+              <span className="ai-status-pill">{aiAvailability === "available" ? "AI READY" : "NO KEY NEEDED"}</span>
+            </div>
 
             <fieldset className="event-type-group">
               <legend>What kind of gathering?</legend>
@@ -283,16 +325,35 @@ export default function Home() {
             <textarea id="notes" maxLength={1000} onChange={(event) => updateForm("notes", event.target.value)} placeholder="Dietary needs, must-haves, things you’d rather skip..." rows={3} value={form.notes} />
 
             {error && <div className="error-message" role="alert">{error}</div>}
+            {aiNotice && <p className="ai-fallback-note" role="status">{aiNotice}</p>}
             <button className="primary-button generate-button" disabled={isGenerating} type="submit">
-              {isGenerating ? <><span className="spinner" /> Dreaming up your plan…</> : <>Make my plan <span aria-hidden="true">✦</span></>}
+              {isGenerating ? (
+                <>
+                  <span className="spinner" />
+                  {aiStatus === "downloading" ? `Preparing private AI · ${downloadProgress}%` :
+                    aiStatus === "generating" ? "Your on-device AI is planning…" :
+                      "Getting your private planner ready…"}
+                </>
+              ) : <>Make my plan <span aria-hidden="true">✦</span></>}
             </button>
-            <p className="privacy-note"><span aria-hidden="true">✿</span> Your details stay yours. We just use them to make your plan.</p>
+            {isGenerating && aiStatus === "downloading" && (
+              <div className="model-progress" role="progressbar" aria-label="Preparing the on-device AI model" aria-valuemin={0} aria-valuemax={100} aria-valuenow={downloadProgress}>
+                <span style={{ width: `${downloadProgress}%` }} />
+              </div>
+            )}
+            <p className="privacy-note"><span aria-hidden="true">✿</span> Browser AI stays on-device; the private fallback uses no external AI service.</p>
           </form>
 
           <div className="plan-column" id="your-plan">
             <div className="plan-heading">
               <div><div className="eyebrow"><span className="live-dot" /> YOUR GATHERLY GAME PLAN</div><h3>{form.eventName || `${form.eventType} celebration`}</h3></div>
-              <span className="plan-badge">{planMode === "gemini" ? "Personalized with Gemini" : "Ready — no API key needed"}</span>
+              <div className="plan-actions">
+                <button className="download-button" onClick={() => downloadPlan(plan, form)} type="button" aria-label="Download your event plan as a text file">↓ Save plan</button>
+                <span className={`plan-badge ${planMode === "on-device" ? "ai-plan-badge" : ""}`}>
+                  {planMode === "on-device" ? "✦ Made with on-device AI" :
+                    planMode === "built-in" ? "Personalized plan · private" : "Your sample plan"}
+                </span>
+              </div>
             </div>
             <p className="plan-summary">{plan.summary}</p>
 
@@ -304,7 +365,7 @@ export default function Home() {
               <div className="budget-list">
                 {plan.budgetBreakdown.map((item, index) => <div className="budget-item" key={item.category}><span className="budget-key" style={{ background: ["#d77b5f", "#83a58b", "#edbc72", "#a68daa", "#759a9d", "#e7a28b", "#b4a176", "#d9d4c8"][index % 8] }} />{item.category}<strong>{formatCurrency(item.amount)}</strong></div>)}
               </div>
-              <div className="budget-footer"><span>Planned so far</span><strong>{formatCurrency(allocatedBudget)}</strong><span>of {formatCurrency(form.budget)}</span></div>
+              <div className="budget-footer"><span>Planned so far</span><strong>{formatCurrency(allocatedBudget)}</strong><span>of {formatCurrency(form.budget)}</span><span className="per-guest">· {formatCurrency(form.budget / Math.max(1, form.guests))} per guest</span></div>
             </section>
 
             <section className="plan-panel timeline-panel">
