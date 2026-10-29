@@ -13,6 +13,14 @@ type PlanRequest = {
   notes: string;
 };
 
+type Plan = {
+  summary: string;
+  budgetBreakdown: { category: string; amount: number }[];
+  timeline: { timing: string; title: string; detail: string }[];
+  vendorChecklist: { name: string; priority: "Essential" | "Helpful" }[];
+  ideas: { title: string; detail: string }[];
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
